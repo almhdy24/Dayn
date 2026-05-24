@@ -1,0 +1,6 @@
+{
+  "name": "دفتر الديون",
+  "description": "تطبيق متكامل وبسيط لإدارة حسابات وديون العملاء للمتاجر الصغيرة والمقاهي ومحلات البيع بالآجل، يعمل بالكامل بدون إنترنت.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,130 @@
+name: Baqi CI/CD Release Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release Baqi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Decode Keystore
+        run: |
+          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Critical Error: KEYSTORE_BASE64 secret is missing. Please configure it in GitHub repository secrets repository."
+            exit 1
+          fi
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > ${{ github.workspace }}/release-key.jks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+      - name: Extract Project Version Information
+        id: get_version
+        run: |
+          # Robustly grep and extract dynamic versionName and versionCode from build.gradle.kts
+          BASE_VERSION=$(grep "versionName =" app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_CODE=$(grep "versionCode =" app/build.gradle.kts | head -n 1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
+          
+          # Use Git Tag as Version Name if triggered by Tag, else generate build-number suffix
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION_NAME="${{ github.ref_name }}"
+          else
+            VERSION_NAME="v${BASE_VERSION}-b${{ github.run_number }}"
+          fi
+          
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "BASE_VERSION=$BASE_VERSION" >> $GITHUB_ENV
+          
+          echo "Version determined: $VERSION_NAME (Code: $VERSION_CODE)"
+
+      - name: Build Signed Release APK
+        run: ./gradlew assembleRelease
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/release-key.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Auto-Generate Changelog from Commit History
+        id: build_changelog
+        run: |
+          echo "### 📝 سجل التغييرات / Changelog" > changelog.txt
+          echo "" >> changelog.txt
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            LAST_TAG=$(git describe --tags --abbrev=0)
+            echo "Commits since last tag ($LAST_TAG):" >> changelog.txt
+            git log ${LAST_TAG}..HEAD --oneline --pretty=format:"* %s (%h)" >> changelog.txt
+          else
+            echo "Recent app updates:" >> changelog.txt
+            git log --oneline -n 15 --pretty=format:"* %s (%h)" >> changelog.txt
+          fi
+          echo "" >> changelog.txt
+          echo "---" >> changelog.txt
+          echo "*Pipeline automated build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}*" >> changelog.txt
+
+      - name: Compress and Bundle Artifacts (Zip)
+        run: |
+          mkdir -p release_package
+          
+          # Copy the compiled signed APK into packaging folder
+          cp app/build/outputs/apk/release/app-release.apk release_package/
+          
+          # Create README metadata text info
+          cat <<EOF > release_package/README-release.txt
+          ==============================================
+          Baqi (دفتر الديون) - Automated Release Summary
+          ==============================================
+          Application ID: com.aistudio.debtbook.vptfky
+          Version Name:   ${VERSION_NAME}
+          Version Code:   ${VERSION_CODE}
+          Commit Hash:    ${{ github.sha }}
+          Build Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          GitHub Run:     ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ==============================================
+          EOF
+          
+          # Create zip container archive
+          cd release_package
+          zip -r ../baqi-release.zip app-release.apk README-release.txt
+          cd ..
+          
+          # Rename the raw standalone APK for release uploads
+          cp app/build/outputs/apk/release/app-release.apk ./app-release.apk
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_NAME }}
+          name: Baqi ${{ env.VERSION_NAME }} Release
+          body_path: changelog.txt
+          draft: false
+          prerelease: false
+          files: |
+            app-release.apk
+            baqi-release.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
